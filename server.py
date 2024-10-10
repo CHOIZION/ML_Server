@@ -5,7 +5,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Dict, List
 import uvicorn
-from add_video import router as add_video_router  # 새로운 파일에서 라우터 가져오기
+from add_video import router as add_video_router  # 비디오 업로드 라우터 가져오기
+from Eye_Tracking_OnOff import router as eye_tracking_router  # Eye Tracking 라우터 가져오기
 
 app = FastAPI()
 
@@ -103,6 +104,10 @@ async def upload_video(request: VideoChunkRequest):
     except Exception as e:
         print(f"[에러] 처리 중 오류 발생: {str(e)}")
         return {"status": "실패", "error": str(e)}
+
+# Eye Tracking 관련 라우터 추가
+from Eye_Tracking_OnOff import router as eye_tracking_router  # Eye Tracking 라우터 가져오기
+app.include_router(eye_tracking_router)  # Eye Tracking 라우터 추가
 
 # 새로운 `/add-video` 엔드포인트를 FastAPI 애플리케이션에 추가
 app.include_router(add_video_router)

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import face_recognition
 import mediapipe as mp
+import sys  # 커맨드라인 인자를 받기 위해 필요
 
 # 미디어파이프 FaceMesh 초기화
 mp_face_mesh = mp.solutions.face_mesh
@@ -125,7 +126,11 @@ def compare_faces_with_webcam(target_encodings, user_name):
         cv2.destroyAllWindows()
 
 def main():
-    target_user = '1'
+    if len(sys.argv) < 2:
+        print("사용할 이름을 입력해주세요.")
+        return
+
+    target_user = sys.argv[1]
     target_encodings = load_user_encodings(target_user)
     compare_faces_with_webcam(target_encodings, target_user)
 
