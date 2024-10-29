@@ -4,22 +4,34 @@ import cv2
 import numpy as np
 import face_recognition
 import mediapipe as mp
-import sys  # 커맨드라인 인자를 받기 위해 필요
+import tensorflow as tf
+from PIL import Image
+from tensorflow.keras.preprocessing.image import img_to_array
+import time
+import sys
 
-# 미디어파이프 FaceMesh 초기화
+# 얼굴 인식 모델 관련 설정
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5)
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5
+)
+
+# 아이 트래킹 모델 로드
+model = tf.keras.models.load_model('itracing.h5')
 
 # 유저 이미지 불러오기 및 얼굴 임베딩 생성
-def load_user_encodings(user_name, user_folder='test'):
-    person_folder = os.path.join(user_folder, user_name)
+def load_user_encodings(user_name):
+    person_folder = os.path.join('videos', user_name)
     if not os.path.exists(person_folder):
         raise ValueError(f"User folder '{person_folder}' not found!")
-    
+   
     person_images = glob(os.path.join(person_folder, '*.jpg'))
     if len(person_images) == 0:
         raise ValueError(f"No images found in '{person_folder}'!")
-    
+   
     target_encodings = []
     for img_path in person_images:
         img = cv2.imread(img_path)
@@ -29,110 +41,121 @@ def load_user_encodings(user_name, user_folder='test'):
 
         face_locations = face_recognition.face_locations(img)
         face_encodings = face_recognition.face_encodings(img, face_locations)
-        
+       
         if len(face_encodings) > 0:
-            target_encodings.append(face_encodings[0])  # 첫 번째 얼굴의 인코딩을 저장
+            target_encodings.append(face_encodings[0])
         else:
             print(f"No face found in image: {img_path}")
 
     if len(target_encodings) == 0:
-        raise ValueError(f"No valid face encodings found for {user_name}")
+        raise ValueError(f"No valid face encodings found in '{person_folder}'")
 
     return target_encodings
 
 # 얼굴을 인식하고 미디어파이프 기반 얼굴 랜드마크 추적
-def recognize_and_track_faces(video_capture, target_encodings, user_name, threshold=0.39):
-    tracking = False  # 현재 얼굴 추적 상태를 나타냄
-    print(f"웹캠을 통한 {user_name} 얼굴 인식을 시작합니다...")
+def recognize_and_track_faces(frame, target_encodings, tracking, user_name, threshold=0.39):
+    face_recognized = False
+    if tracking:
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
+
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                draw_face_landmarks(frame, face_landmarks.landmark, frame.shape[1], frame.shape[0], user_name)
+            face_recognized = True
+        else:
+            tracking = False
+    else:
+        face_locations = face_recognition.face_locations(frame)
+        face_encodings = face_recognition.face_encodings(frame, face_locations)
+
+        for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+            distances = face_recognition.face_distance(target_encodings, face_encoding)
+            min_distance = min(distances)
+
+            if min_distance < threshold:
+                cv2.putText(frame, user_name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                tracking = True
+                face_recognized = True
+                break
+
+    return tracking, face_recognized
+
+def draw_face_landmarks(frame, landmarks, width, height, user_name):
+    landmark_points = [(int(landmark.x * width), int(landmark.y * height)) for landmark in landmarks]
+    x_min, y_min = min(landmark_points, key=lambda p: p[0])[0], min(landmark_points, key=lambda p: p[1])[1]
+    x_max, y_max = max(landmark_points, key=lambda p: p[0])[0], max(landmark_points, key=lambda p: p[1])[1]
+    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+    cv2.putText(frame, user_name, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+# 아이 트래킹을 위한 모델 예측 함수
+def predict_mouse_coordinates(cropped_frame):
+    cropped_image = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
+    cropped_image = cropped_image.resize((240, 60))
+    input_data = img_to_array(cropped_image) / 255.0
+    input_data = np.expand_dims(input_data, axis=0)
+    predicted_coords = model.predict(input_data)
+    predicted_coords = predicted_coords[0] * [1920, 1080]
+    predicted_x, predicted_y = min(max(int(predicted_coords[0]), 0), 1920), min(max(int(predicted_coords[1]), 0), 1080)
+    return predicted_x, predicted_y
+
+# 메인 함수: 얼굴 인식과 아이 트래킹 모드를 전환하며 실행
+def main():
+    if len(sys.argv) < 2:
+        print("사용법: python final_face_verif.py <user_name>")
+        sys.exit(1)
+    user_name = sys.argv[1]
+    target_encodings = load_user_encodings(user_name)
+
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+    mode = 'face_recognition'
+    tracking = False
+    face_detected_time = None  # 얼굴 인식 시간을 저장하는 변수
+
+    # 추출할 영역의 좌표 (아이 트래킹 모드에서 사용)
+    x, y, w, h = 875, 330, 240, 60
+
+    print(f"웹캠을 통한 얼굴 인식을 시작합니다. 'Q'를 눌러 종료하세요.")
 
     while True:
-        ret, frame = video_capture.read()
+        ret, frame = cap.read()
         if not ret:
             print("웹캠에서 프레임을 읽을 수 없습니다.")
             break
 
-        # 프레임 좌우 반전
         frame = cv2.flip(frame, 1)
 
-        # 프레임 크기
-        height, width, _ = frame.shape
+        if mode == 'face_recognition':
+            tracking, face_recognized = recognize_and_track_faces(frame, target_encodings, tracking, user_name)
 
-        # 현재 추적 중일 때는 미디어파이프를 사용해 랜드마크 추적
-        if tracking:
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb_frame)
-
-            if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    # 랜드마크 기반 바운딩 박스 그리기
-                    draw_face_landmarks(frame, face_landmarks.landmark, width, height, user_name)
+            if face_recognized:
+                if face_detected_time is None:
+                    face_detected_time = time.time()
+                elif time.time() - face_detected_time > 5:  # 5초 후에 아이 트래킹 모드로 전환
+                    mode = 'eye_tracking'
+                    print(f"모드를 {mode}로 전환합니다.")
             else:
-                tracking = False  # 얼굴을 찾지 못하면 추적 중단
+                face_detected_time = None  # 얼굴을 놓치면 타이머 리셋
 
-        else:
-            # 얼굴 인식 수행
-            face_locations = face_recognition.face_locations(frame)
-            face_encodings = face_recognition.face_encodings(frame, face_locations)
+        elif mode == 'eye_tracking':
+            cropped_frame = frame[y:y+h, x:x+w]
+            predicted_x, predicted_y = predict_mouse_coordinates(cropped_frame)
+            cv2.circle(frame, (predicted_x, predicted_y), 5, (0, 0, 255), -1)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            coord_text = f'Predicted Coordinates: ({predicted_x}, {predicted_y})'
+            cv2.putText(frame, coord_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-                distances = face_recognition.face_distance(target_encodings, face_encoding)
-                min_distance = min(distances)
+        cv2.imshow('Webcam', frame)
 
-                if min_distance < threshold:
-                    label = f"{user_name} ({min_distance:.2f})"
-                    color = (0, 255, 0)
-
-                    # 얼굴 인식 성공 시, 추적 모드 활성화
-                    tracking = True
-                    print(f"{user_name} 얼굴이 인식되었습니다. 랜드마크 추적을 시작합니다.")
-                    cv2.putText(frame, user_name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    break  # 추적 시작을 위해 얼굴 인식 중단
-                else:
-                    label = f"Unknown ({min_distance:.2f})"
-                    color = (0, 0, 255)
-
-                cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-                cv2.putText(frame, label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        cv2.imshow('Video', frame)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
 
-def draw_face_landmarks(frame, landmarks, width, height, user_name):
-    landmark_points = []
-    for landmark in landmarks:
-        x = int(landmark.x * width)
-        y = int(landmark.y * height)
-        landmark_points.append((x, y))
-
-    x_min = min(point[0] for point in landmark_points)
-    y_min = min(point[1] for point in landmark_points)
-    x_max = max(point[0] for point in landmark_points)
-    y_max = max(point[1] for point in landmark_points)
-
-    # 바운딩 박스 그리기
-    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-    
-    # 유저 이름을 바운딩 박스 위에 표시
-    cv2.putText(frame, user_name, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-def compare_faces_with_webcam(target_encodings, user_name):
-    video_capture = cv2.VideoCapture(0)
-    try:
-        recognize_and_track_faces(video_capture, target_encodings, user_name)
-    finally:
-        video_capture.release()
-        cv2.destroyAllWindows()
-
-def main():
-    if len(sys.argv) < 2:
-        print("사용할 이름을 입력해주세요.")
-        return
-
-    target_user = sys.argv[1]
-    target_encodings = load_user_encodings(target_user)
-    compare_faces_with_webcam(target_encodings, target_user)
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
